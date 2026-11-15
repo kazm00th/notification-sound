@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>通知音</title>
+<style>
+  :root {
+    --bg: #f6f4ef;
+    --fg: #222;
+    --muted: #777;
+    --accent: #b5651d;
+    --dot-off: #ddd6c8;
+    --btn-bg: #fff;
+    --btn-border: #bbb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1b19;
+      --fg: #eee;
+      --muted: #999;
+      --accent: #e0954a;
+      --dot-off: #3a3732;
+      --btn-bg: #2a2825;
+      --btn-border: #555;
+    }
+  }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  main { text-align: center; padding: 16px; }
+  h1 { font-size: 1.4rem; font-weight: 600; margin: 0 0 4px; }
+  .freq { color: var(--muted); margin: 0 0 24px; }
+  #dot {
+    width: 48px; height: 48px; border-radius: 50%;
+    margin: 0 auto 24px;
+    background: var(--dot-off);
+    transition: background 0.25s ease-out, transform 0.25s ease-out;
+  }
+  #dot.hit { background: var(--accent); transform: scale(1.15); transition: none; }
+  button {
+    font-size: 1.1rem;
+    padding: 10px 32px;
+    border-radius: 8px;
+    border: 1px solid var(--btn-border);
+    background: var(--btn-bg);
+    color: var(--fg);
+    cursor: pointer;
+  }
+  #status { color: var(--muted); min-height: 1.5em; margin: 20px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>通知音</h1>
+  <p class="freq" id="freq"></p>
+  <div id="dot"></div>
+  <button id="toggle">停止</button>
+  <p id="status"></p>
+</main>
+
+<script>
+'use strict';
+
+// ---- 設定 -------------------------------------------------------------
+const FREQ = 220 * Math.pow(2, 10 / 12);  // G4 ≒ 392.0 Hz
+const INTERVAL = 1.0;     // 打つ間隔 [s]
+const LOOKAHEAD = 0.1;    // どこまで先の打鍵を予約しておくか [s]
+const TICK_MS = 25;       // 予約を見直す間隔 [ms]
+const ATTACK = 0.005;     // 振幅の立ち上がり時間 [s]（0 → 最大まで直線で上げる）
+
+// マリンバの音板は下の方の振動モードが基音の 4 倍・10 倍になるよう削って調律される。
+// 高い成分ほど早く減衰させると、木を叩いた「コン」という感じになる。
+//   [基音に対する比, 振幅, 減衰の時定数 s]
+const PARTIALS = [
+  [1.0,  1.00, 0.30],
+  [4.0,  0.30, 0.06],
+  [9.9,  0.10, 0.02],
+];
+
+// ---- 音声グラフ -------------------------------------------------------
+const ctx = new AudioContext();
+const master = ctx.createGain();
+master.gain.value = 0.5;
+master.connect(ctx.destination);
+
+const active = new Set();  // 予約済み・鳴っている音源（停止で一斉に止めるため）
+function track(src) {
+  active.add(src);
+  src.onended = () => active.delete(src);
+}
+
+function strike(t) {
+  for (const [ratio, amp, tau] of PARTIALS) {
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = FREQ * ratio;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(amp, t + ATTACK);  // 立ち上げ
+    g.gain.setTargetAtTime(0, t + ATTACK, tau);       // 指数減衰
+    osc.connect(g).connect(master);
+    osc.start(t);
+    osc.stop(t + ATTACK + tau * 8);                   // e^-8 ≒ 0.03% まで落ちたら止める
+    track(osc);
+  }
+
+  // 画面の点を音に合わせて光らせる
+  const delayMs = Math.max(0, (t - ctx.currentTime) * 1000);
+  setTimeout(flash, delayMs);
+}
+
+// ---- 1 秒ごとの予約（先読みスケジューラ） --------------------------------
+// setInterval だけで鳴らすとタイマーの揺れがそのまま聞こえるので、
+// 発音時刻は AudioContext の時計で決め、setInterval は「少し先まで予約する」係にする。
+let running = true;
+let nextTime = ctx.currentTime + 0.05;
+let timer = null;
+
+function tick() {
+  while (nextTime < ctx.currentTime + LOOKAHEAD) {
+    strike(nextTime);
+    nextTime += INTERVAL;
+  }
+}
+
+// ---- 画面 -------------------------------------------------------------
+const dot = document.getElementById('dot');
+const statusEl = document.getElementById('status');
+const btn = document.getElementById('toggle');
+document.getElementById('freq').textContent = `${FREQ.toFixed(2)} Hz ・ ${INTERVAL} 秒ごと`;
+
+function flash() {
+  if (!running) return;
+  dot.classList.add('hit');
+  requestAnimationFrame(() => requestAnimationFrame(() => dot.classList.remove('hit')));
+}
+
+function updateStatus() {
+  if (!running) {
+    statusEl.textContent = '停止中';
+  } else if (ctx.state === 'running') {
+    statusEl.textContent = '鳴らしています';
+  } else {
+    statusEl.textContent = 'ブラウザが自動再生を止めています。ページのどこかをクリックすると鳴り始めます';
+  }
+}
+ctx.onstatechange = updateStatus;
+
+// ---- 自動再生 ---------------------------------------------------------
+// ブラウザは操作なしで音を出すのを止めることがある（autoplay policy）。
+// その場合 AudioContext は suspended のまま始まるので、最初のクリック／キー入力で resume する。
+function unlock(e) {
+  if (!running) return;
+  if (e && e.target === btn) return;       // 停止ボタンの押下で一瞬鳴らないように
+  if (ctx.state === 'suspended') {
+    // 止まっていた間の時刻ずれを捨てて、すぐ次の音から始める
+    ctx.resume().then(() => { nextTime = ctx.currentTime + 0.05; });
+  }
+}
+document.addEventListener('pointerdown', unlock);
+document.addEventListener('keydown', unlock);
+
+timer = setInterval(tick, TICK_MS);
+tick();
+ctx.resume().catch(() => {});
+updateStatus();
+
+// ---- 停止・再生 -------------------------------------------------------
+const MASTER_GAIN = 0.5;
+let suspendTimer = null;
+
+function stop() {
+  running = false;
+  clearInterval(timer);
+  const now = ctx.currentTime;
+  master.gain.cancelScheduledValues(now);
+  master.gain.setValueAtTime(master.gain.value, now);
+  master.gain.setTargetAtTime(0, now, 0.01);           // 鳴っている音は 10 ms でフェードアウト
+  for (const src of active) {
+    try { src.stop(now + 0.06); } catch (_) {}         // 予約済みの未来の音も取り消す
+  }
+  btn.textContent = '再生';
+  updateStatus();
+  // フェードが終わったら音声の処理を休ませる（close と違って resume で戻せる）
+  suspendTimer = setTimeout(() => { suspendTimer = null; ctx.suspend(); }, 150);
+}
+
+function play() {
+  clearTimeout(suspendTimer);                          // 停止直後に押されたら休ませるのを取り消す
+  suspendTimer = null;
+  running = true;
+  btn.textContent = '停止';
+  ctx.resume().then(() => {
+    if (!running) return;                              // resume を待つ間にまた停止された
+    const now = ctx.currentTime;
+    master.gain.cancelScheduledValues(now);
+    master.gain.setValueAtTime(MASTER_GAIN, now);
+    nextTime = now + 0.05;                             // 押した直後に 1 拍目
+    clearInterval(timer);
+    timer = setInterval(tick, TICK_MS);
+    tick();
+    updateStatus();
+  });
+}
+
+btn.addEventListener('click', () => (running ? stop() : play()));
+
+// 確認用（開発者ツールから window.marimba.sounding() で鳴っている数を見られる）
+window.marimba = { ctx, sounding: () => active.size, isRunning: () => running };
+</script>
+</body>
+</html>
